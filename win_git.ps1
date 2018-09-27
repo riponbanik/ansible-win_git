@@ -5,6 +5,7 @@
 # Anatoliy Ivashina <tivrobo@gmail.com>
 # Pablo Estigarribia <pablodav@gmail.com>
 # Michael Hay <project.hay@gmail.com>
+# Ripon Banik <ripon.banik@gmail.com>
 
 #Requires -Module Ansible.ModuleUtils.Legacy.psm1
 
@@ -19,11 +20,13 @@ $clone = ConvertTo-Bool (Get-AnsibleParam -obj $params -name "clone" -default $t
 $update = ConvertTo-Bool (Get-AnsibleParam -obj $params -name "update" -default $false)
 $replace_dest = ConvertTo-Bool (Get-AnsibleParam -obj $params -name "replace_dest" -default $false)
 $accept_hostkey = ConvertTo-Bool (Get-AnsibleParam -obj $params -name "accept_hostkey" -default $false)
+$key_file = Get-AnsibleParam -obj $params -name "key_file"
 
 $result = New-Object psobject @{
     win_git = New-Object psobject @{
         repo              = $null
         dest              = $null
+        key_file          = $null
         clone             = $false
         replace_dest      = $true
         accept_hostkey    = $true
@@ -40,6 +43,8 @@ $env:Path += ";" + "C:\Program Files\Git\bin"
 $env:Path += ";" + "C:\Program Files\Git\usr\bin"
 $env:Path += ";" + "C:\Program Files (x86)\Git\bin"
 $env:Path += ";" + "C:\Program Files (x86)\Git\usr\bin"
+$env:Path += ";" + "C:\Program Files\Git\cmd"
+$env:Path += ";" + "C:\Program Files (x86)\Git\cmd"
 
 # Functions
 function Find-Command {
@@ -94,21 +99,49 @@ function CheckSshKnownHosts {
     & cmd /c ssh-keygen.exe -F $gitServer | Out-Null
     $rc = $LASTEXITCODE
     
-    if ($rc -ne 0){
+    if ($rc -ne 0){       
+        
         # Host is unknown
         if ($accept_hostkey){
             # workaroung for disable BOM
             # https://github.com/tivrobo/ansible-win_git/issues/7
             $sshHostKey = & cmd /c ssh-keyscan.exe -t ecdsa-sha2-nistp256 $gitServer
-            $sshHostKey += "`n"
+            $sshHostKey += "`n"            
             $sshKnownHostsPath = Join-Path -Path $env:Userprofile -ChildPath \.ssh\known_hosts
             [System.IO.File]::AppendAllText($sshKnownHostsPath, $sshHostKey, $(New-Object System.Text.UTF8Encoding $False))
         }
         else {
             Fail-Json -obj $result -message  "Host is not known!"
         }
+        # SSH Private Key Config for Host
+        if (Test-Path -Path $key_file){
+            $sshConfigPath = Join-Path -Path ((Get-Command git.exe).Source | Split-Path | Split-Path) -ChildPath etc/ssh/ssh_config
+            $key_search = Get-Content -Path $sshConfigPath  | Select-String "Host $gitServer" 
+            if (-Not (Test-Path -Path $env:Userprofile\.ssh)) { New-Item -ItemType directory -Path $env:Userprofile\.ssh }
+            Get-Content -Path $key_file | Set-Content -Path $env:Userprofile\.ssh\id_rsa
+            Set-Attr $result.win_git "key_file" "$key_file"
+            & cmd /c start-ssh-agent.cmd | Out-Null
+            & cmd /c ssh-add.exe $env:Userprofile\.ssh\id_rsa
+            # Add Host Config if not exists
+            if ([string]::IsNullOrEmpty($key_search)) {               
+                try {
+                  [System.IO.File]::AppendAllText( $sshConfigPath, "Host $gitServer", $(New-Object System.Text.UTF8Encoding $False))
+                  [System.IO.File]::AppendAllText( $sshConfigPath, "IdentityFile $env:Userprofile\.ssh\id_rsa", $(New-Object System.Text.UTF8Encoding $False))       
+                }
+                catch {
+                    $ErrorMessage = $_.Exception.Message
+                    Fail-Json $result "Error updating $sshConfigPath Msg: $ErrorMessage"
+                }
+              
+            }
+
+        }
+        else {
+            Fail-Json -obj $result -message  "Key Path not found!"
+        }
     }
 }
+
 
 function CheckSshIdentity {
     [CmdletBinding()]
